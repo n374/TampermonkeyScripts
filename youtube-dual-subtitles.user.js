@@ -1,44 +1,48 @@
 // ==UserScript==
 // @name         YouTube Dual Subtitles / Youtube 双语字幕
-// @version      0.1.0
+// @version      0.1.1
 // @description  Show dual sutitles in YouTube player, based on https://github.com/CoinkWang/Y2BDoubleSubs
 // @author       n374
 // @match        *://www.youtube.com/watch?v=*
 // @match        *://www.youtube.com
 // @match        *://www.youtube.com/*
-// @require      https://unpkg.com/ajax-hook@2.0.2/dist/ajaxhook.min.js
+// @require      https://unpkg.com/ajax-hook@2.1.3/dist/ajaxhook.min.js
 // @grant        none
 // @namespace    https://github.com/n374/TampermonkeyScripts
 // ==/UserScript==
 
 (function() {
-    let localeLang = navigator.language ? navigator.language : 'en'
-    let perferedLang = ["zh", "zh-Hans", "zh-Hant"]
-    let enLang = ["en", "en-GB"]
-    let langsMap = undefined
+    // Customisable
+    const perferedLang = ["zh", "zh-Hans", "zh-Hant"]
+    const secondLang = ["en", "en-GB"]
 
-    function getCaption(url) {
-        if (url == undefined) {
-            return undefined
-        }
+
+
+    const hookedParameter = "&translate_h00ked"
+    const subAPI = "/api/timedtext"
+    let langSet = undefined
+
+    function getCaptionWithLang(url, lang) {
+        let reg = new RegExp("(^|[&?])lang=([^&]*)", 'g');
 
         let xhr = new XMLHttpRequest();
-        // Use RegExp to clean '&tlang=...' in our xhr request params while using Y2B auto translate.
-        xhr.open('GET', url + `&fmt=json3&translate_h00ked`, false);
+        // Use RegExp to replace parameter lang
+        let newUrl = url.replace(reg, "&lang=" + lang) + hookedParameter
+        xhr.open('GET', newUrl, false);
         xhr.send();
         return JSON.parse(xhr.response)
     }
 
-    function parseLangsMap(response) {
-        let langsMap = new Map()
+    function extractLangs(response) {
+        let langSet = new Set()
         let captions = response.captions.playerCaptionsTracklistRenderer.captionTracks
         for (let i = 0; i < captions.length; i++) {
             if (captions[i].kind == "asr") {
                 continue
             }
-            langsMap.set(captions[i].languageCode, captions[i].baseUrl)
+            langSet.add(captions[i].languageCode)
         }
-        return langsMap
+        return langSet
     }
 
     function mergeSegs(first, second, currentOrder) {
@@ -65,17 +69,16 @@
     }
 
     function mergeCaption(left, right) {
-        // when length of segments are not the same (e.g. automatic generated english subs)
-        var lEvents = left.events.filter(event => event.aAppend !== 1 && event.segs)
-        var rEvents = right.events.filter(event => event.aAppend !== 1 && event.segs)
+        let lEvents = left.events.filter(event => event.aAppend !== 1 && event.segs)
+        let rEvents = right.events.filter(event => event.aAppend !== 1 && event.segs)
 
-        var lLen = lEvents.length
-        var rLen = rEvents.length
+        let lLen = lEvents.length
+        let rLen = rEvents.length
 
-        var lIdx = 0
-        var rIdx = 0
+        let lIdx = 0
+        let rIdx = 0
 
-        var res = []
+        let res = []
         while (lIdx < lLen && rIdx < rLen) {
             let l = lEvents[lIdx]
             let r = rEvents[rIdx]
@@ -151,9 +154,9 @@
     // https://stackoverflow.com/a/64961272
     const {fetch: origFetch} = window;
     window.fetch = async (...args) => {
-        var found = false
-        var url
-        for (var i = 0; i < args.length; i++) {
+        let found = false
+        let url
+        for (let i = 0; i < args.length; i++) {
             if (args[i].url != undefined && args[i].url.includes("/v1/player?")) {
                 url = args[i].url
                 found = true
@@ -174,7 +177,7 @@
                 .clone()
                 .json()
                 .then(body => {
-                langsMap = parseLangsMap(body)
+                langSet = extractLangs(body)
             });
         }
 
@@ -182,59 +185,58 @@
         return response;
     };
 
-    // localeLang = 'zh'  // uncomment this line to define the language you wish here
     ah.proxy({
         onRequest: (config, handler) => {
             handler.next(config);
         },
         onResponse: (response, handler) => {
-            if (!response.config.url.includes('/api/timedtext') || response.config.url.includes('&translate_h00ked')) {
+            let url = response.config.url
+            if (!url.includes(subAPI) || url.includes(hookedParameter)) {
                 handler.resolve(response)
                 return;
             }
 
-            console.log("handling " + response.config.url)
-            if (langsMap == undefined) {
-                langsMap = parseLangsMap(ytInitialPlayerResponse)
+            if (langSet == undefined) {
+                langSet = extractLangs(ytInitialPlayerResponse)
             }
 
-            var cnCaption
+            let firstCaption
             for (let i = 0; i < perferedLang.length; i++) {
-                if (langsMap.get(perferedLang[i]) != undefined) {
-                    cnCaption = getCaption(langsMap.get(perferedLang[i]))
+                if (langSet.has(perferedLang[i])) {
+                    firstCaption = getCaptionWithLang(url, perferedLang[i])
                     break
                 }
             }
 
-            var enCaption
-            for (let i = 0; i < enLang.length; i++) {
-                if (langsMap.get(enLang[i]) != undefined) {
-                    enCaption = getCaption(langsMap.get(enLang[i]))
+            let secondCaption
+            for (let i = 0; i < secondLang.length; i++) {
+                if (langSet.has(secondLang[i])) {
+                    secondCaption = getCaptionWithLang(url, secondLang[i])
                     break
                 }
             }
 
             // if we can only get one caption or none
-            if (cnCaption == undefined && enCaption == undefined) {
-                console.log("no cn or en caption found")
+            if (firstCaption == undefined && secondCaption == undefined) {
+                console.log("no caption found")
                 handler.resolve(response)
                 return
             }
-            if (cnCaption == undefined) {
-                console.log("en caption found")
-                response.response = JSON.stringify(enCaption)
+            if (firstCaption == undefined) {
+                console.log("only first caption found")
+                response.response = JSON.stringify(secondCaption)
                 handler.resolve(response)
                 return
             }
-            if (enCaption == undefined) {
-                console.log("cn caption found")
-                response.response = JSON.stringify(cnCaption)
+            if (secondCaption == undefined) {
+                console.log("only second caption found")
+                response.response = JSON.stringify(firstCaption)
                 handler.resolve(response)
                 return
             }
 
 
-            response.response = JSON.stringify(mergeCaption(cnCaption, enCaption))
+            response.response = JSON.stringify(mergeCaption(firstCaption, secondCaption))
             handler.resolve(response)
         }
     })
