@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         YouTube Dual Subtitles / Youtube 双语字幕
-// @version      0.1.1
+// @version      0.1.2
 // @description  Show dual sutitles in YouTube player, based on https://github.com/CoinkWang/Y2BDoubleSubs
 // @author       n374
 // @match        *://www.youtube.com/watch?v=*
@@ -12,17 +12,22 @@
 // ==/UserScript==
 
 (function() {
-    // Customisable
-    const perferedLang = ["zh", "zh-Hans", "zh-Hant"]
-    const secondLang = ["en", "en-GB"]
+    // Customisable，support js regex (add '^' & '$' automatically)
+    const perferedLang = ["zh", "zh-Hans", "zh-.*"]
+    const secondLang = ["en", "en-.*"]
 
 
 
+    const placeholder = " "
     const hookedParameter = "&translate_h00ked"
     const subAPI = "/api/timedtext"
     let langSet = undefined
 
+    // get subtitles for specific language with a url for other language
     function getCaptionWithLang(url, lang) {
+        if (lang == undefined) {
+            return
+        }
         let reg = new RegExp("(^|[&?])lang=([^&]*)", 'g');
 
         let xhr = new XMLHttpRequest();
@@ -30,9 +35,14 @@
         let newUrl = url.replace(reg, "&lang=" + lang) + hookedParameter
         xhr.open('GET', newUrl, false);
         xhr.send();
-        return JSON.parse(xhr.response)
+        try {
+            return JSON.parse(xhr.response)
+        } catch (err) {
+            console.log(`failed to parse ${newUrl} with err: ${err.message}, result ${xhr.response}`)
+        }
     }
 
+    // extract language set from API response
     function extractLangs(response) {
         let langSet = new Set()
         let captions = response.captions.playerCaptionsTracklistRenderer.captionTracks
@@ -45,6 +55,19 @@
         return langSet
     }
 
+    // find first match language in perferd list
+    function matchLang(perferedList, langList) {
+        for (const perfer of perferedList) {
+            for (const lang of langList) {
+                let re = new RegExp("^" + perfer + "$")
+                if (lang.match(re)) {
+                    return lang
+                }
+            }
+        }
+    }
+
+    // merge segs of two event with specific order
     function mergeSegs(first, second, currentOrder) {
         let obj = new Object()
         obj.tStartMs = first.tStartMs
@@ -57,8 +80,8 @@
             return line
         }
 
-        let firstStr = first == undefined ? "　" : onelineSeg(first)
-        let secondStr = second == undefined ? "　" : onelineSeg(second)
+        let firstStr = first == undefined ? placeholder : onelineSeg(first)
+        let secondStr = second == undefined ? placeholder : onelineSeg(second)
 
         if (currentOrder) {
             obj.segs[0].utf8 = firstStr + "\n" + secondStr
@@ -68,6 +91,7 @@
         return obj
     }
 
+    // merge two captions
     function mergeCaption(left, right) {
         let lEvents = left.events.filter(event => event.aAppend !== 1 && event.segs)
         let rEvents = right.events.filter(event => event.aAppend !== 1 && event.segs)
@@ -151,6 +175,7 @@
         return left
     }
 
+    // intercept fetch() API to hook new player by create a mock 'window'
     // https://stackoverflow.com/a/64961272
     const {fetch: origFetch} = window;
     window.fetch = async (...args) => {
@@ -185,6 +210,8 @@
         return response;
     };
 
+
+    // add hook to ajax request to modify subtitles
     ah.proxy({
         onRequest: (config, handler) => {
             handler.next(config);
@@ -200,21 +227,12 @@
                 langSet = extractLangs(ytInitialPlayerResponse)
             }
 
-            let firstCaption
-            for (let i = 0; i < perferedLang.length; i++) {
-                if (langSet.has(perferedLang[i])) {
-                    firstCaption = getCaptionWithLang(url, perferedLang[i])
-                    break
-                }
-            }
+            let firstMatch = matchLang(perferedLang, langSet)
+            let firstCaption = getCaptionWithLang(url, firstMatch)
 
-            let secondCaption
-            for (let i = 0; i < secondLang.length; i++) {
-                if (langSet.has(secondLang[i])) {
-                    secondCaption = getCaptionWithLang(url, secondLang[i])
-                    break
-                }
-            }
+            let secondMatch = matchLang(secondLang, langSet)
+            let secondCaption = getCaptionWithLang(url, secondMatch)
+
 
             // if we can only get one caption or none
             if (firstCaption == undefined && secondCaption == undefined) {
@@ -223,19 +241,19 @@
                 return
             }
             if (firstCaption == undefined) {
-                console.log("only first caption found")
+                console.log(`only second caption '${secondMatch}' found`)
                 response.response = JSON.stringify(secondCaption)
                 handler.resolve(response)
                 return
             }
             if (secondCaption == undefined) {
-                console.log("only second caption found")
+                console.log(`only first caption '${firstMatch}' found`)
                 response.response = JSON.stringify(firstCaption)
                 handler.resolve(response)
                 return
             }
 
-
+            console.log(`found caption: ${firstMatch}, ${secondMatch}`)
             response.response = JSON.stringify(mergeCaption(firstCaption, secondCaption))
             handler.resolve(response)
         }
